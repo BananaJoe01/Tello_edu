@@ -13,6 +13,9 @@ esp_err_t init_sdcard();
 
 void startCameraServer();
 
+camera_config_t config;
+int image_count = 0;
+
 const char* def_ssid = "TELLO-C5B5E1"; // Tello/AccessPoint SSID (pomenovanie Wi-Fi siete)
 const char* def_pass = ""; // Tello/AccessPoint Password (heslo pre WiFi sieť)
 
@@ -154,7 +157,7 @@ void setup() {
 
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
-    Serial.printf("Inicializácia kamery zlyhala s chybou 0x%x", err);
+    Serial.printf("Chyba inicializácie kamery: %s\n", esp_err_to_name(err));
     return;
   }
 
@@ -257,7 +260,7 @@ void takePictureAndSaveToSD() {
     TelloCommand("land");
 
     // Otvoriť kameru na module ESP32-CAM
-    esp_err_t err = esp_camera_init(&camera_config);
+    esp_err_t err = esp_camera_init(&config);
     if (err != ESP_OK) {
       Serial.printf("Chyba pri inicializácii kamery: %d", err);
       return;
@@ -305,11 +308,21 @@ void TelloCommand(const char* cmd) {
 }
 
 void captureImage() {
-  String filename = "/image" + String(imageCount) + ".jpg"; // Vytvor názov súboru
-  camera.capture(filename.c_str()); // Sprav snímku a ulož ju na SD kartu
-
-  Serial.println("Snímka bola uložená na SD kartu: " + filename);
-  imageCount++;
+  String filename = "/image" + String(image_count) + ".jpg";
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (!fb) {
+    Serial.println("Chyba získania snímku z kamery");
+    return;
+  }
+  File file = SD_MMC.open(filename.c_str(), FILE_WRITE);
+  if (!file) {
+    Serial.println("Chyba otvorenia súboru");
+    return;
+  }
+  file.write(fb->buf, fb->len);
+  file.close();
+  esp_camera_fb_return(fb);
+  image_count++;
 }
 
 void connectToWiFi(const char * ssid, const char * pwd) {
