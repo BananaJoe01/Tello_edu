@@ -1,6 +1,7 @@
 #include "esp_camera.h"
 #include <WiFi.h>
 #include <WiFiUdp.h>
+#include <SD_MMC.h>
 
 #define CAMERA_MODEL_AI_THINKER
 
@@ -12,8 +13,8 @@ esp_err_t init_sdcard();
 
 void startCameraServer();
 
-const char* def_ssid = "TELLO-C5B5E1"; // Tello SSID
-const char* def_pass = ""; // Tello Password
+const char* def_ssid = "TELLO-C5B5E1"; // Tello/AccessPoint SSID (pomenovanie Wi-Fi siete)
+const char* def_pass = ""; // Tello/AccessPoint Password (heslo pre WiFi sieť)
 
 const char * udpAddress = "192.168.10.1";
 const int udpPort = 8889;
@@ -124,7 +125,7 @@ void setup() {
   config.xclk_freq_hz = 20000000;
   config.frame_size = FRAMESIZE_UXGA;
   config.pixel_format = PIXFORMAT_JPEG;
-  // config.pixel_format = PIXFORMAT_RGB565; // for face detection/recognition
+  config.pixel_format = PIXFORMAT_RGB565; // pre detekciu/rozpoznávanie tváre
   config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
   config.fb_location = CAMERA_FB_IN_PSRAM;
   config.jpeg_quality = 12;
@@ -153,7 +154,7 @@ void setup() {
 
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
-    Serial.printf("Camera init failed with error 0x%x", err);
+    Serial.printf("Inicializácia kamery zlyhala s chybou 0x%x", err);
     return;
   }
 
@@ -180,7 +181,7 @@ void setup() {
 
   esp_err_t  card_err = init_sdcard();
   if (card_err != ESP_OK) {
-    Serial.printf("SD Card init failed with error 0x%x", card_err);
+    Serial.printf("Inicializácia SD karty zlyhala s chybou 0x%x", card_err);
   }
 
   // start_wifi();
@@ -198,51 +199,121 @@ bool takeOff = false;
 
 void loop() {
 
-  if (takeOff) {
-    // Up 60 cm
+  if (takeOff) { // Ak dron vzlietol, potom nech sa vykonajú príkazy:
+    // Stúpnuť hore o 60 cm
     TelloCommand("up 60");
     delay(3000);
-    // Down 50 cm
+    // Klesnúť dole o 50 cm
     TelloCommand("down 50");
     delay(3000);  
-    // Left 30 cm
+    // Posunúť vľavo o 30 cm
     TelloCommand("left 30");
     delay(3000);
-    // Right 30 cm
+    // Posunúť vpravo o 30 cm
     TelloCommand("right 30");
     delay(3000);
-    // Turn CW 360 degrees
+    // Otočiť v smere hodinových ručičiek o 360 stupňov
     TelloCommand("cw 360");
     delay(3000);
-    // Turn ccw 360 degrees
+    // Otočiť proti smeru hodinových ručičiek o 360 stupňov
     TelloCommand("ccw 360");
     delay(3000);
-    // Flip back    
+    // Prevrátiť smerom dozadu
     TelloCommand("flip b");
     delay(3000);
-    // Flip front
+    // Prevrátiť smerom dopredu
     TelloCommand("flip f");
     delay(3000);
-    // Land
+
+    // Vytvoriť snímku a uložiť na SD kartu
+    takePictureAndSaveToSD();
+    
+    // Pristáť
     TelloCommand("land");
     delay(5000);
-    takeOff = false;
+    takeOff = false; // Po pristatí už nevzlietať
   }
 
   delay(1000);
 }
 
-void TelloCommand(char *cmd) {
+void takePictureAndSaveToSD() {
+  camera_fb_t* fb = NULL; // Obrázok zo snímača kamery
+  File file; // Súbor na ukladanie obrázka
+  
+  // Vytvorenie súboru pre snímku
+  file = SD_MMC.open("/picture.jpg", FILE_WRITE);
+  
+  // Ak sa podarilo otvoriť súbor, požiada sa dron o snímku a tá sa uloží na SD kartu
+  if (file) {
+    // Požiadať drona o snímku
+    TelloCommand("takeoff");
+    TelloCommand("streamon");
+    TelloCommand("rc 0 0 0 20");
+    delay(2000);
+    TelloCommand("rc 0 0 0 0");
+    delay(2000);
+    TelloCommand("streamoff");
+    TelloCommand("land");
+
+    // Otvoriť kameru na module ESP32-CAM
+    esp_err_t err = esp_camera_init(&camera_config);
+    if (err != ESP_OK) {
+      Serial.printf("Chyba pri inicializácii kamery: %d", err);
+      return;
+    }
+
+    // Získanie snímky z kamery
+    fb = esp_camera_fb_get();
+    if (!fb) {
+      Serial.println("Chyba pri získaní snímky z kamery");
+      return;
+    }
+
+    // Zapísanie snímky do súboru
+    file.write(fb->buf, fb->len);
+
+    // Uvoľnenie pamäte alokovanej pre snímku
+    esp_camera_fb_return(fb);
+
+    // Uzavretie súboru
+    file.close();
+
+    Serial.println("Snímka bola úspešne uložená na SD kartu");
+  } else {
+    Serial.println("Nepodarilo sa vytvoriť súbor pre snímku");
+  }
+}
+
+void TelloCommand(const char* cmd) {
   if (connected) {
     udp.beginPacket(udpAddress, udpPort);
     udp.printf(cmd);
     udp.endPacket();
-    Serial.printf("Send [%s] to Tello.\n", cmd);
+    Serial.printf("Odosiela sa príkaz [%s] pre dron Tello.\n", cmd);
+
+    if (strcmp(cmd, "takeoff") == 0) { // Ak dron vzlietol, začni snímať
+      takeOff = true;
+    }
+    if (strcmp(cmd, "land") == 0) { // Ak dron pristál, prestaň snímať
+      takeOff = false;
+    }
+    if (takeOff && strcmp(cmd, "streamon") == 0) { // Ak dron sníma, ukladaj snímky
+      captureImage();
+    }
   }
 }
 
+void captureImage() {
+  String filename = "/image" + String(imageCount) + ".jpg"; // Vytvor názov súboru
+  camera.capture(filename.c_str()); // Sprav snímku a ulož ju na SD kartu
+
+  Serial.println("Snímka bola uložená na SD kartu: " + filename);
+  imageCount++;
+}
+
 void connectToWiFi(const char * ssid, const char * pwd) {
-  Serial.println("Connecting to WiFi network: " + String(ssid));
+  Serial.println("Pripájanie sa k WiFi sieti: " + String(ssid));
 
   WiFi.disconnect(true);
 
@@ -250,33 +321,33 @@ void connectToWiFi(const char * ssid, const char * pwd) {
 
   WiFi.begin(ssid, pwd);
 
-  Serial.println("Waiting for WiFi connection ...");
+  Serial.println("Čaká sa na WiFi pripojenie ...");
 }
 
 void WiFiEvent(WiFiEvent_t event) {
   switch (event) {
     case SYSTEM_EVENT_STA_GOT_IP:
 
-      Serial.print("WiFi connected! IP address: ");
+      Serial.print("WiFi bolo úspešne pripojené. IP adresa: ");
       Serial.println(WiFi.localIP());
 
       udp.begin(WiFi.localIP(), udpPort);
       connected = true;
 
-      TelloCommand("command");
+      TelloCommand("command");  // Vykoná sa príkaz pre dron
       delay(2000);
 
-      TelloCommand("speed 50");
+      TelloCommand("speed 50"); // Rýchlosť dronu 50
       delay(2000);
 
-      TelloCommand("takeoff");
+      TelloCommand("takeoff");  // Vzlietnúť 
       delay(3000);
 
-      takeOff = true;
+      takeOff = true;           // Po vzletnutí nepristávať
 
       break;
     case SYSTEM_EVENT_STA_DISCONNECTED:
-      Serial.println("WiFi lost connection");
+      Serial.println("Strata WiFi pripojenia.");
       connected = false;
 
       break;
